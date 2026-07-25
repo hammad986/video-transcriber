@@ -48,7 +48,7 @@ graph TD
 ## Installation Instructions
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/video-transcriber.git
+   git clone https://github.com/hammad986/video-transcriber.git
    cd video-transcriber
    ```
 2. **Set up Python environment:**
@@ -67,7 +67,7 @@ graph TD
 ### Web UI
 1. **Start the Streamlit app:**
    ```bash
-   streamlit run video_qa/app.py
+   streamlit run transcriber/app.py
    ```
 2. **Open your browser:**
    - Go to [http://localhost:8501](http://localhost:8501)

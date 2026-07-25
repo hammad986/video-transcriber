@@ -1,0 +1,216 @@
+"""
+Configuration module for Video-QA system.
+Loads settings from config.yaml.
+
+Fix: Config.get() now checks the file modification time on every call.
+If config.yaml has been saved since the last load, it is reloaded
+automatically — no process restart needed.
+"""
+
+import os
+import yaml
+from pathlib import Path
+from typing import Any, Dict, Optional
+from dotenv import load_dotenv
+
+
+class Config:
+    """Configuration manager for Video-QA system."""
+
+    _instance: Optional['Config'] = None
+    _config: Dict[str, Any] = {}
+    _config_path: Optional[Path] = None
+    _last_mtime: float = 0.0          # filesystem mtime at last load
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._load_config()
+        return cls._instance
+    
+    def _expand_env_vars(self, data: Any) -> Any:
+        """Recursively expand environment variables in config data.
+
+        If a value is ${VAR_NAME} and the environment variable is not set,
+        returns an empty string rather than raising — this allows the system
+        to start cleanly even when optional API keys (Grok, Gemini, OpenAI,
+        HF) are not configured. Providers that need these keys will skip
+        themselves gracefully when they see an empty string.
+        """
+        import re
+        if isinstance(data, str):
+            # Check if string matches ${VAR_NAME} pattern
+            match = re.match(r'^\$\{([^}]+)\}$', data)
+            if match:
+                var_name = match.group(1)
+                value = os.getenv(var_name)
+                if value is None:
+                    # Return "" so optional providers are silently skipped.
+                    # (Callers check `if not api_key: return None`)
+                    import logging as _logging
+                    _logging.getLogger(__name__).debug(
+                        f"Env var '{var_name}' not set — provider will be skipped."
+                    )
+                    return ""
+                return value
+            else:
+                return data
+        elif isinstance(data, dict):
+            return {key: self._expand_env_vars(value) for key, value in data.items()}
+        elif isinstance(data, list):
+            return [self._expand_env_vars(item) for item in data]
+        else:
+            return data
+
+
+    def _load_config(self):
+        """Load configuration from config.yaml"""
+        # Load environment variables from .env file
+        load_dotenv()
+        
+        config_path = Path(__file__).parent.parent / "config.yaml"
+        self._config_path = config_path
+
+        if not config_path.exists():
+            # Create default config if not exists
+            self._config = self._get_default_config()
+            self._save_config(config_path)
+            self._last_mtime = config_path.stat().st_mtime
+        else:
+            with open(config_path, 'r') as f:
+                loaded_config = yaml.safe_load(f) or {}
+            # Expand environment variables in the loaded config
+            self._config = self._expand_env_vars(loaded_config)
+            self._last_mtime = config_path.stat().st_mtime
+
+    def reload(self) -> None:
+        """Force a fresh reload of config.yaml from disk."""
+        if self._config_path and self._config_path.exists():
+            with open(self._config_path, 'r') as f:
+                self._config = yaml.safe_load(f) or {}
+            self._last_mtime = self._config_path.stat().st_mtime
+
+    def _check_reload(self) -> None:
+        """Silently reload config.yaml if the file has been modified."""
+        if self._config_path and self._config_path.exists():
+            try:
+                mtime = self._config_path.stat().st_mtime
+                if mtime != self._last_mtime:
+                    self.reload()
+            except OSError:
+                pass
+    
+    def _get_default_config(self) -> Dict[str, Any]:
+        """Return default configuration"""
+        return {
+            "video": {
+                "input_dir": "data/videos",
+                "output_dir": "data/audio",
+                "supported_formats": [".mp4", ".mkv", ".avi", ".mov", ".webm"],
+                "audio_settings": {
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "codec": "pcm_s16le"
+                }
+            },
+            "speech": {
+                "model_size": "small",
+                "device": "cpu",
+                "compute_type": "int8",
+                "beam_size": 1,
+                "best_of": 1,
+                "temperature": 0,
+                "use_whisperx": True,
+                "alignment": True,
+                "vad_filter": True,
+                "vad_min_silence_ms": 700,
+                "restore_punctuation": True,
+                "llm_correction": False
+            },
+            "logging": {
+                "level": "INFO",
+                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                "file": "video_qa.log"
+            }
+        }
+    
+    def _save_config(self, path: Path):
+        """Save default configuration to file"""
+        with open(path, 'w') as f:
+            yaml.dump(self._config, f, default_flow_style=False)
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get configuration value using dot notation (e.g., 'video.input_dir').
+
+        Automatically reloads config.yaml if it has been modified on disk
+        since the last read — no process restart required.
+        """
+        # ── SINGLETON STALE-CACHE FIX ───────────────────────────────────────────────
+        # If config.yaml was saved after initial startup (e.g. user added
+        # hf_token), pick up the change without restarting the process.
+        self._check_reload()
+
+        keys = key.split('.')
+        value = self._config
+
+        for k in keys:
+            if isinstance(value, dict):
+                value = value.get(k)
+                if value is None:
+                    return default
+            else:
+                return default
+
+        # Treat an empty / whitespace-only string as "not set" (return default)
+        if isinstance(value, str) and not value.strip():
+            return default
+
+        return value
+    
+    def get_section(self, section: str) -> Dict[str, Any]:
+        """Get entire configuration section"""
+        return self._config.get(section, {})
+    
+    @property
+    def video(self) -> Dict[str, Any]:
+        return self._config.get("video", {})
+    
+    @property
+    def speech(self) -> Dict[str, Any]:
+        return self._config.get("speech", {})
+    
+    @property
+    def chunking(self) -> Dict[str, Any]:
+        return self._config.get("chunking", {})
+    
+    @property
+    def embeddings(self) -> Dict[str, Any]:
+        return self._config.get("embeddings", {})
+    
+    @property
+    def retrieval(self) -> Dict[str, Any]:
+        return self._config.get("retrieval", {})
+    
+    @property
+    def reranking(self) -> Dict[str, Any]:
+        return self._config.get("reranking", {})
+    
+    @property
+    def answer(self) -> Dict[str, Any]:
+        return self._config.get("answer", {})
+    
+    @property
+    def verification(self) -> Dict[str, Any]:
+        return self._config.get("verification", {})
+    
+    @property
+    def output(self) -> Dict[str, Any]:
+        return self._config.get("output", {})
+    
+    @property
+    def logging_config(self) -> Dict[str, Any]:
+        return self._config.get("logging", {})
+
+
+# Global config instance
+config = Config()

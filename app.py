@@ -4,6 +4,7 @@ import tempfile
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 import gradio as gr
 import yt_dlp

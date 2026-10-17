@@ -51,15 +51,35 @@ def format_timestamp(seconds: float) -> str:
     millis = int((seconds - int(seconds)) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-def download_youtube_audio(url: str) -> str:
+def prepare_cookies(cookie_file=None, cookie_text: str = "") -> Optional[str]:
+    """Resolve cookie file from user upload, paste, local file, or env var."""
+    if cookie_file and os.path.exists(str(cookie_file)):
+        return str(cookie_file)
+    if cookie_text and cookie_text.strip():
+        tmp = Path(tempfile.mkdtemp()) / "cookies.txt"
+        tmp.write_text(cookie_text.strip(), encoding="utf-8")
+        return str(tmp)
+    local_cookie = Path("cookies.txt")
+    if local_cookie.exists():
+        return str(local_cookie)
+    env_cookie = os.getenv("YOUTUBE_COOKIES") or os.getenv("COOKIES_TXT")
+    if env_cookie and env_cookie.strip():
+        tmp = Path(tempfile.mkdtemp()) / "cookies.txt"
+        tmp.write_text(env_cookie.strip(), encoding="utf-8")
+        return str(tmp)
+    return None
+
+def download_youtube_audio(url: str, cookie_file=None, cookie_text: str = "") -> str:
     tmp_dir = Path(tempfile.mkdtemp())
     out_tmpl = str(tmp_dir / "%(id)s.%(ext)s")
+    cookie_path = prepare_cookies(cookie_file, cookie_text)
+
     ydl_opts = {
         "outtmpl": out_tmpl,
         "format": "ba/b",
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"]
+                "player_client": ["android", "ios", "mweb", "web"]
             }
         },
         "postprocessors": [{
@@ -69,6 +89,10 @@ def download_youtube_audio(url: str) -> str:
         "quiet": True,
         "no_warnings": True,
     }
+    if cookie_path and os.path.exists(cookie_path):
+        ydl_opts["cookiefile"] = cookie_path
+        print(f"Using cookies from: {cookie_path}")
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -83,6 +107,8 @@ def download_youtube_audio(url: str) -> str:
             }],
             "quiet": True,
         }
+        if cookie_path and os.path.exists(cookie_path):
+            fallback_opts["cookiefile"] = cookie_path
         with yt_dlp.YoutubeDL(fallback_opts) as ydl:
             ydl.download([url])
     
@@ -161,7 +187,7 @@ def transcribe_core(audio_path: str, model_size: str):
     # 100% reliable CPU execution (unlimited requests, no quota limits)
     return transcribe_cpu(audio_path, model_size)
 
-def process_transcription(source_mode, input_file, youtube_url, model_size, progress=gr.Progress()):
+def process_transcription(source_mode, input_file, youtube_url, model_size, cookie_file=None, cookie_text: str = "", progress=gr.Progress()):
     tmp_files = []
     try:
         audio_path = None
@@ -177,14 +203,16 @@ def process_transcription(source_mode, input_file, youtube_url, model_size, prog
                 return "⚠️ Please enter a valid YouTube URL first.", None, None
             progress(0.1, desc="Downloading YouTube audio...")
             try:
-                audio_path = download_youtube_audio(youtube_url.strip())
+                audio_path = download_youtube_audio(youtube_url.strip(), cookie_file, cookie_text)
                 tmp_files.append(audio_path)
             except Exception as yt_err:
                 err_msg = str(yt_err)
                 if "bot" in err_msg.lower() and "sign in" in err_msg.lower():
                     return (
-                        "❌ YouTube Bot Wall: YouTube blocks automated requests from cloud/datacenter IPs without login.\n\n"
-                        "💡 Solution: Please select the 'Upload File' option above and upload your video/audio file directly (.mp4, .mp3, .wav) to transcribe instantly!",
+                        "❌ YouTube Bot Wall: YouTube blocks automated requests from cloud datacenter IPs.\n\n"
+                        "💡 Solutions:\n"
+                        "1. Select 'Upload File' above and upload your video/audio file directly (.mp4, .mp3, .wav) to transcribe instantly without any block!\n"
+                        "2. Or export YouTube cookies using 'Get cookies.txt LOCALLY' extension and upload/paste them in the Cookies section below.",
                         None, None
                     )
                 return f"❌ Error downloading YouTube video: {err_msg}", None, None
@@ -232,9 +260,9 @@ def process_transcription(source_mode, input_file, youtube_url, model_size, prog
 
 def update_visibility(mode):
     if mode == "Upload File":
-        return gr.update(visible=True), gr.update(visible=False)
+        return gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)
     else:
-        return gr.update(visible=False), gr.update(visible=True)
+        return gr.update(visible=False), gr.update(visible=True), gr.update(visible=True)
 
 # Custom CSS for modern clean UI
 custom_css = """
@@ -268,11 +296,22 @@ with gr.Blocks(title="AI Video & Audio Transcriber", css=custom_css, theme=gr.th
                     placeholder="https://www.youtube.com/watch?v=...",
                     visible=False
                 )
+                with gr.Accordion("🍪 YouTube Cookies (Recommended for YouTube URLs on Cloud)", open=False, visible=False) as cookie_accordion:
+                    gr.Markdown(
+                        """
+                        YouTube restricts cloud datacenters (like Hugging Face Spaces) with bot verification.
+                        If you encounter bot detection, you can either:
+                        1. **Upload your video/audio directly** using 'Upload File' (100% reliable, no cookies needed), **OR**
+                        2. Export your YouTube cookies using [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) and upload/paste them below:
+                        """
+                    )
+                    cookie_file = gr.File(label="Upload cookies.txt", file_types=[".txt"], type="filepath")
+                    cookie_text = gr.TextArea(label="Or Paste Netscape Cookie Text", placeholder="# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t...", lines=2)
                 
                 source_mode.change(
                     fn=update_visibility,
                     inputs=[source_mode],
-                    outputs=[input_file, youtube_url]
+                    outputs=[input_file, youtube_url, cookie_accordion]
                 )
                 
                 model_size = gr.Dropdown(
@@ -296,7 +335,7 @@ with gr.Blocks(title="AI Video & Audio Transcriber", css=custom_css, theme=gr.th
 
         transcribe_btn.click(
             fn=process_transcription,
-            inputs=[source_mode, input_file, youtube_url, model_size],
+            inputs=[source_mode, input_file, youtube_url, model_size, cookie_file, cookie_text],
             outputs=[output_text, download_txt, download_srt]
         )
         

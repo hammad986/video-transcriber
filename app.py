@@ -57,9 +57,10 @@ def download_youtube_audio(url: str) -> str:
     ydl_opts = {
         "outtmpl": out_tmpl,
         "format": "ba/b",
+        "impersonate": "chrome",
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"]
+                "player_client": ["android", "ios", "mweb"]
             }
         },
         "postprocessors": [{
@@ -139,10 +140,10 @@ def process_transcription(source_mode, input_file, youtube_url, model_size, prog
                 tmp_files.append(audio_path)
             except Exception as yt_err:
                 err_msg = str(yt_err)
-                if "Sign in to confirm you're not a bot" in err_msg:
+                if "bot" in err_msg.lower() and "sign in" in err_msg.lower():
                     return (
-                        "❌ YouTube Bot Wall: YouTube detected a cloud server IP and requires bot verification.\n\n"
-                        "💡 Solution: Please download or have the video/audio file and upload it directly using the 'Upload File' option above!",
+                        "❌ YouTube Bot Wall: YouTube blocks automated requests from cloud/datacenter IPs without login.\n\n"
+                        "💡 Solution: Please select the 'Upload File' option above and upload your video/audio file directly (.mp4, .mp3, .wav) to transcribe instantly!",
                         None, None
                     )
                 return f"❌ Error downloading YouTube video: {err_msg}", None, None

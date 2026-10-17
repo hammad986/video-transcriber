@@ -57,10 +57,9 @@ def download_youtube_audio(url: str) -> str:
     ydl_opts = {
         "outtmpl": out_tmpl,
         "format": "ba/b",
-        "impersonate": "chrome",
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "mweb"]
+                "player_client": ["android", "ios"]
             }
         },
         "postprocessors": [{
@@ -70,8 +69,22 @@ def download_youtube_audio(url: str) -> str:
         "quiet": True,
         "no_warnings": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as err:
+        print(f"Android/iOS extractor failed ({err}). Trying default fallback...")
+        fallback_opts = {
+            "outtmpl": out_tmpl,
+            "format": "ba/b",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+            }],
+            "quiet": True,
+        }
+        with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+            ydl.download([url])
     
     candidates = list(tmp_dir.glob("*.wav"))
     if not candidates:
@@ -148,7 +161,7 @@ def transcribe_core(audio_path: str, model_size: str):
     # 100% reliable CPU execution (unlimited requests, no quota limits)
     return transcribe_cpu(audio_path, model_size)
 
-def process_transcription(source_mode, input_file, youtube_url, model_size, progress=gr.Progress(track_tqdm=True)):
+def process_transcription(source_mode, input_file, youtube_url, model_size, progress=gr.Progress()):
     tmp_files = []
     try:
         audio_path = None

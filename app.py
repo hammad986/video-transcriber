@@ -101,7 +101,7 @@ def convert_to_wav(file_path: str) -> str:
     
     return file_path
 
-def transcribe_core(audio_path: str, model_size: str):
+def _transcribe_gpu_fn(audio_path: str, model_size: str):
     model = get_whisper_model(model_size)
     segments, info = model.transcribe(audio_path, beam_size=2, vad_filter=True)
     seg_list = []
@@ -113,12 +113,40 @@ def transcribe_core(audio_path: str, model_size: str):
         })
     return seg_list, info.language.upper(), info.language_probability
 
-# ZeroGPU decorator
+# ZeroGPU decorator with short 30s duration to prevent daily quota starvation
+transcribe_gpu = None
 try:
     if HAS_GPU:
-        transcribe_core = spaces.GPU(duration=120)(transcribe_core)
+        transcribe_gpu = spaces.GPU(duration=30)(_transcribe_gpu_fn)
 except Exception:
-    pass
+    transcribe_gpu = None
+
+def transcribe_cpu(audio_path: str, model_size: str):
+    print(f"Executing Faster-Whisper ({model_size}) on CPU with int8 quantization...")
+    cpu_key = f"cpu_{model_size}"
+    if cpu_key not in MODELS:
+        MODELS[cpu_key] = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
+    model = MODELS[cpu_key]
+    segments, info = model.transcribe(audio_path, beam_size=2, vad_filter=True)
+    seg_list = []
+    for s in segments:
+        seg_list.append({
+            "start": s.start,
+            "end": s.end,
+            "text": s.text.strip()
+        })
+    return seg_list, info.language.upper(), info.language_probability
+
+def transcribe_core(audio_path: str, model_size: str):
+    # Try GPU first if ZeroGPU is active
+    if transcribe_gpu is not None:
+        try:
+            return transcribe_gpu(audio_path, model_size)
+        except Exception as e:
+            print(f"ZeroGPU unavailable or quota exceeded ({e}). Gracefully falling back to CPU...")
+    
+    # 100% reliable CPU execution (unlimited requests, no quota limits)
+    return transcribe_cpu(audio_path, model_size)
 
 def process_transcription(source_mode, input_file, youtube_url, model_size, progress=gr.Progress(track_tqdm=True)):
     tmp_files = []

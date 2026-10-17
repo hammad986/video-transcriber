@@ -183,4 +183,4 @@ with gr.Blocks(title="AI Video & Audio Transcriber", css=custom_css, theme=gr.th
         )
 
 if __name__ == "__main__":
-    demo.launch(ssr=False)
+    demo.launch()

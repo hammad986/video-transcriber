@@ -1,67 +1,42 @@
-"""
-Video Transcriber System - Streamlit Application
-Extracts exact voice (transcription) from video files.
-"""
-
-import streamlit as st
 import os
 import sys
-from pathlib import Path
-import json
-
-# Add project root to sys.path natively before any package imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import tempfile
 import shutil
-import asyncio
-import atexit
-import threading
-import time
+from pathlib import Path
 
-# ── Windows asyncio fix (prevents "Event loop is closed" on shutdown) ──────
-if sys.platform == "win32":
-    try:
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except Exception:
-        pass
+import gradio as gr
+import yt_dlp
+from faster_whisper import WhisperModel
 
+try:
+    import spaces
+    import torch
+    HAS_GPU = torch.cuda.is_available()
+except ImportError:
+    HAS_GPU = False
 
-def graceful_shutdown():
-    try:
-        from transcriber.speech_understanding import _whisper_model as _wm
-        if _wm is not None:
-            del _wm
-    except Exception:
-        pass
-    main_thread = threading.main_thread()
-    for t in threading.enumerate():
-        if t is not main_thread and not t.daemon:
-            try:
-                t.join(timeout=2.0)
-            except Exception:
-                pass
+# Cache models to avoid reloading
+MODELS = {}
 
+def get_whisper_model(model_size="base"):
+    if model_size not in MODELS:
+        device = "cuda" if HAS_GPU else "cpu"
+        compute_type = "float16" if HAS_GPU else "int8"
+        print(f"Loading WhisperModel({model_size}) on {device} ({compute_type})...")
+        MODELS[model_size] = WhisperModel(model_size, device=device, compute_type=compute_type)
+    return MODELS[model_size]
 
-atexit.register(graceful_shutdown)
+def format_timestamp(seconds: float) -> str:
+    """Format seconds into SRT timestamp HH:MM:SS,mmm"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds - int(seconds)) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-st.set_page_config(
-    page_title="Video Transcriber",
-    page_icon="🎬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-def download_youtube_to_file(url: str, status_placeholder) -> "str | None":
-    try:
-        import yt_dlp
-    except ImportError:
-        st.error("yt-dlp is not installed. Run:  pip install yt-dlp")
-        return None
-
-    tmp_dir  = Path(tempfile.mkdtemp())
+def download_youtube_audio(url: str) -> str:
+    tmp_dir = Path(tempfile.mkdtemp())
     out_tmpl = str(tmp_dir / "%(id)s.%(ext)s")
-
     ydl_opts = {
         "outtmpl": out_tmpl,
         "format": "bestaudio/best",
@@ -72,141 +47,140 @@ def download_youtube_to_file(url: str, status_placeholder) -> "str | None":
         "quiet": True,
         "no_warnings": True,
     }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    
+    candidates = list(tmp_dir.glob("*.wav"))
+    if not candidates:
+        candidates = [f for f in tmp_dir.glob("*.*") if f.suffix.lower() != ".webp"]
+    if candidates:
+        return str(candidates[0])
+    raise RuntimeError("Failed to extract audio from YouTube URL.")
 
-    status_placeholder.text("⬇️ Extracting YouTube audio stream…")
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+def process_transcription(input_file, youtube_url, model_size, progress=gr.Progress(track_tqdm=True)):
+    if not input_file and not youtube_url:
+        return "Please upload a media file or provide a YouTube URL.", None, None
 
-        candidates = list(tmp_dir.glob("*.wav"))
-        if not candidates:
-            candidates = [f for f in tmp_dir.glob("*.*") if f.suffix.lower() != ".webp"]
-        if candidates:
-            return str(candidates[0])
-
-        st.error("Download completed but output WAV file not found.")
-    except Exception as exc:
-        st.error(f"YouTube download failed: {exc}")
-    return None
-
-def main():
-    st.title("🎬 Video Transcriber")
-    st.markdown("Upload a video or enter a YouTube URL to extract exact transcription.")
-    st.markdown("---")
-
-    with st.sidebar:
-        st.header("📊 System Status")
-        st.info("System Ready")
-
-    st.subheader("📤 Upload & Process Video")
-
-    input_method = st.radio(
-        "Choose input method:",
-        ["Upload Video File", "YouTube URL", "Use Existing Videos"],
-        horizontal=True,
-    )
-
-    video_path: "str | None"  = None
-    youtube_url: "str | None" = None
-
-    if input_method == "Upload Video File":
-        uploaded_file = st.file_uploader(
-            "Choose a video file",
-            type=["mp4", "mkv", "avi", "mov", "webm", "mp3", "wav", "m4a"],
-        )
-        if uploaded_file is not None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-                shutil.copyfileobj(uploaded_file, tmp)
-                video_path = tmp.name
-            st.success(f"✅ Ready to process: {uploaded_file.name}")
-
-    elif input_method == "YouTube URL":
-        youtube_url = st.text_input(
-            "Enter YouTube URL:",
-            placeholder="https://www.youtube.com/watch?v=...",
-        )
-
-    elif input_method == "Use Existing Videos":
-        video_dir = Path("data/videos")
-        if video_dir.exists():
-            videos = sorted(
-                list(video_dir.glob("*.mp4"))
-                + list(video_dir.glob("*.mkv"))
-                + list(video_dir.glob("*.avi"))
-            )
-            if videos:
-                selected = st.selectbox("Select video:", [str(v) for v in videos])
-                video_path = selected
-            else:
-                st.warning("No videos found in data/videos/")
-        else:
-            st.warning("data/videos/ directory not found")
-
-    ready_to_process = bool(video_path or youtube_url)
-    if ready_to_process:
-        if st.button("🚀 Process Video", type="primary", use_container_width=True):
-            _run_process_video(video_path=video_path, youtube_url=youtube_url)
-
-def _run_process_video(video_path: "str | None", youtube_url: "str | None" = None):
-    progress_bar = st.progress(0)
-    status_text  = st.empty()
+    audio_path = None
+    tmp_files = []
 
     try:
-        if youtube_url:
-            video_path = download_youtube_to_file(youtube_url, status_text)
-            if video_path is None:
-                return
-            progress_bar.progress(15)
-
-        from transcriber.video_processor import convert_video_to_audio
-        from transcriber.speech_understanding import transcribe_audio
-
-        status_text.text("🎵 Extracting audio from video…")
-        progress_bar.progress(30)
-        audio_path = convert_video_to_audio(video_path, force=True)
-        if not audio_path:
-            st.error("Audio extraction failed.")
-            return
-
-        status_text.text("🎤 Transcribing speech with Whisper…")
-        progress_bar.progress(60)
-        transcript_path = transcribe_audio(audio_path)
+        progress(0.1, desc="Preparing audio source...")
+        if youtube_url and youtube_url.strip():
+            progress(0.2, desc="Downloading YouTube audio...")
+            audio_path = download_youtube_audio(youtube_url.strip())
+            tmp_files.append(audio_path)
+        elif input_file:
+            audio_path = input_file
         
-        if not transcript_path:
-            st.error("Transcription failed.")
-            return
+        progress(0.4, desc=f"Loading Faster-Whisper ({model_size})...")
+        model = get_whisper_model(model_size)
 
-        progress_bar.progress(100)
-        status_text.empty()
-        progress_bar.empty()
+        progress(0.6, desc="Transcribing speech to text...")
+        segments, info = model.transcribe(audio_path, beam_size=2, vad_filter=True)
 
-        st.success("✅ Transcription Complete!")
-        
-        # Display transcript
-        with open(transcript_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
-        full_text = data.get("full_transcript", "")
-        
-        st.subheader("📝 Exact Voice Transcript")
-        
-        # Download button for easy access to full raw text
-        st.download_button(
-            label="⬇️ Download Full Transcript as TXT",
-            data=full_text,
-            file_name=f"transcript_{Path(video_path).stem}.txt",
-            mime="text/plain",
-            use_container_width=True
+        full_text_list = []
+        srt_lines = []
+        srt_idx = 1
+
+        for seg in segments:
+            full_text_list.append(seg.text.strip())
+            start_str = format_timestamp(seg.start)
+            end_str = format_timestamp(seg.end)
+            srt_lines.append(f"{srt_idx}\n{start_str} --> {end_str}\n{seg.text.strip()}\n")
+            srt_idx += 1
+
+        full_transcript = " ".join(full_text_list)
+        srt_content = "\n".join(srt_lines)
+
+        progress(0.9, desc="Exporting files...")
+        out_dir = Path(tempfile.mkdtemp())
+        txt_path = str(out_dir / "transcript.txt")
+        srt_path = str(out_dir / "transcript.srt")
+
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(full_transcript)
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(srt_content)
+
+        summary = f"Detected Language: {info.language.upper()} (Probability: {info.language_probability:.2f})\n\n{full_transcript}"
+        return summary, txt_path, srt_path
+
+    except Exception as e:
+        return f"Error during transcription: {str(e)}", None, None
+    finally:
+        for f in tmp_files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception:
+                pass
+
+# ZeroGPU decorator when spaces module is active
+try:
+    if HAS_GPU:
+        process_transcription = spaces.GPU(process_transcription)
+except Exception:
+    pass
+
+# Custom CSS for modern clean UI
+custom_css = """
+.container { max-width: 950px; margin: auto; }
+.header-box { text-align: center; margin-bottom: 1.5rem; }
+"""
+
+with gr.Blocks(title="AI Video & Audio Transcriber", css=custom_css, theme=gr.themes.Soft()) as demo:
+    with gr.Column(elem_classes=["container"]):
+        gr.Markdown(
+            """
+            # 🎬 AI-Powered Video & Audio Transcriber
+            Convert speech from **Video files, Audio recordings, or YouTube URLs** into exact text transcripts and timestamped SRT subtitles.
+            *Powered by Faster-Whisper & CTranslate2*
+            """
         )
         
-        # Text area for easy copy-pasting
-        st.text_area("Full Transcript (Copy-Paste Ready)", full_text, height=400)
+        with gr.Row():
+            with gr.Column(scale=1):
+                input_file = gr.File(
+                    label="Upload Video or Audio",
+                    file_types=["video", "audio"],
+                    type="filepath"
+                )
+                youtube_url = gr.Textbox(
+                    label="Or Enter YouTube URL",
+                    placeholder="https://www.youtube.com/watch?v=..."
+                )
+                model_size = gr.Dropdown(
+                    label="Whisper Model Size",
+                    choices=["tiny", "base", "small", "medium"],
+                    value="base",
+                    info="Larger models improve accuracy; 'base' and 'small' provide the ideal speed/accuracy balance."
+                )
+                transcribe_btn = gr.Button("🚀 Transcribe Now", variant="primary", size="lg")
             
-    except Exception as exc:
-        st.error(f"Error during processing: {exc}")
-        progress_bar.empty()
-        status_text.empty()
+            with gr.Column(scale=1):
+                output_text = gr.Textbox(
+                    label="Exact Transcript Output",
+                    lines=14,
+                    show_copy_button=True,
+                    placeholder="Transcript will appear here once processing completes..."
+                )
+                with gr.Row():
+                    download_txt = gr.File(label="Download Transcript (TXT)")
+                    download_srt = gr.File(label="Download Subtitles (SRT)")
+
+        transcribe_btn.click(
+            fn=process_transcription,
+            inputs=[input_file, youtube_url, model_size],
+            outputs=[output_text, download_txt, download_srt]
+        )
+        
+        gr.Markdown(
+            """
+            ---
+            Built by **Muhammed Hammad** | [GitHub](https://github.com/hammad986) | [LinkedIn](https://linkedin.com/in/hammad986)
+            """
+        )
 
 if __name__ == "__main__":
-    main()
-
+    demo.launch()

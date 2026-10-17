@@ -1,3 +1,4 @@
-gradio==4.44.1
+gradio>=5.20.0
+pydantic==2.10.6
 faster-whisper>=1.0.0
 yt-dlp>=2024.3.10

@@ -8,6 +8,18 @@ import gradio as gr
 import yt_dlp
 from faster_whisper import WhisperModel
 
+# Patch gradio_client schema reflection bug with boolean schemas
+try:
+    import gradio_client.utils
+    _orig_get_type = gradio_client.utils.get_type
+    def _safe_get_type(schema):
+        if isinstance(schema, bool):
+            return "boolean"
+        return _orig_get_type(schema)
+    gradio_client.utils.get_type = _safe_get_type
+except Exception:
+    pass
+
 try:
     import spaces
     import torch
@@ -143,8 +155,7 @@ with gr.Blocks(title="AI Video & Audio Transcriber", css=custom_css, theme=gr.th
             with gr.Column(scale=1):
                 input_file = gr.File(
                     label="Upload Video or Audio",
-                    file_types=[".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a"],
-                    type="filepath"
+                    file_types=[".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a"]
                 )
                 youtube_url = gr.Textbox(
                     label="Or Enter YouTube URL",

@@ -143,7 +143,7 @@ with gr.Blocks(title="AI Video & Audio Transcriber", css=custom_css, theme=gr.th
             with gr.Column(scale=1):
                 input_file = gr.File(
                     label="Upload Video or Audio",
-                    file_types=["video", "audio"],
+                    file_types=[".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a"],
                     type="filepath"
                 )
                 youtube_url = gr.Textbox(
@@ -183,4 +183,4 @@ with gr.Blocks(title="AI Video & Audio Transcriber", css=custom_css, theme=gr.th
         )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(ssr=False)
